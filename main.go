@@ -1,36 +1,63 @@
 package main
 
 import (
-	"fmt"
 	"context"
 	"database/sql"
+	"fmt"
+	"io"
 	"net/http"
-	"github.com/gin-gonic/gin"
-	_ "github.com/lib/pq"
-	"time"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"os"
 	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v4/pgxpool"
+	_ "github.com/lib/pq"
 )
 
 const (
-	host     = "db"
 	port     = 5432
 	user     = "rinha"
 	password = "rinha123"
 	dbname   = "rinha"
 )
 
-func getConnection() *pgxpool.Pool {
-	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
-    "password=%s dbname=%s sslmode=disable",
-    host, port, user, password, dbname)
+func getEnv(key, fallback string) string {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		value = fallback
+	}
+	return value
+}
 
+func toInt(str string) int64 {
+	num, err := strconv.ParseInt(str, 10, 64)
+	if err != nil {
+		panic("Erro ao converter a string para int")
+	}
+	return num
+}
+
+func getConnection() *pgxpool.Pool {
+	var host = getEnv("DB_HOST", "localhost")
+	var maxConns = getEnv("DB_MAX_CONNS", "10")
+	var minConns = getEnv("DB_MIN_CONNS", "1")
+
+	fmt.Println("DB_HOST     : 	" + host)
+	fmt.Println("DB_MAX_CONNS: 	" + maxConns)
+	fmt.Println("DB_MIN_CONNS:	" + minConns)
+
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+
+		"password=%s dbname=%s sslmode=disable",
+		host, port, user, password, dbname)
 
 	config, err := pgxpool.ParseConfig(psqlInfo)
 	if err != nil {
 		panic(err)
 	}
-	config.MaxConns = 10
+
+	config.MaxConns = int32(toInt(maxConns))
+	config.MinConns = int32(toInt(minConns))
 
 	pool, err := pgxpool.ConnectConfig(context.Background(), config)
 	if err != nil {
@@ -38,13 +65,13 @@ func getConnection() *pgxpool.Pool {
 	}
 
 	return pool
-	
+
 }
 
 type TransacaoRequest struct {
-    Valor 		int 		`json:"valor"`
-    Tipo 		string 		`json:"tipo"`
-	Descricao 	string 		`json:"descricao"`
+	Valor     int    `json:"valor"`
+	Tipo      string `json:"tipo"`
+	Descricao string `json:"descricao"`
 }
 
 type Cliente struct {
@@ -56,24 +83,35 @@ type Cliente struct {
 }
 
 type Transacao struct {
-	ID           sql.NullInt64
-	ClienteID    sql.NullInt64
-	Valor        sql.NullInt64
-	Tipo         sql.NullString
-	Descricao    sql.NullString
-	RealizadaEm  sql.NullTime
+	ID          sql.NullInt64
+	ClienteID   sql.NullInt64
+	Valor       sql.NullInt64
+	Tipo        sql.NullString
+	Descricao   sql.NullString
+	RealizadaEm sql.NullTime
 }
 
 type TransacaoResponse struct {
-	Valor        	int64		`json:"valor"`
-	Tipo         	string		`json:"tipo"`
-	Descricao   	string		`json:"descricao"`
-	RealizadaEm  	time.Time	`json:"realizada_em"`
+	Valor       int64     `json:"valor"`
+	Tipo        string    `json:"tipo"`
+	Descricao   string    `json:"descricao"`
+	RealizadaEm time.Time `json:"realizada_em"`
+}
+
+type SaldoResponse struct {
+	Total       int64     `json:"total"`
+	DataExtrato time.Time `json:"data_extrato"`
+	Limite      int64     `json:"limite"`
+}
+
+type ExtratoResponse struct {
+	Saldo             SaldoResponse       `json:"saldo"`
+	UltimasTransacoes []TransacaoResponse `json:"ultimas_transacoes"`
 }
 
 func main() {
 	gin.SetMode(gin.ReleaseMode)
-
+	gin.DefaultWriter = io.Discard
 	db := getConnection()
 	defer db.Close()
 	r := gin.Default()
@@ -100,18 +138,20 @@ func main() {
 	`
 
 		rows, err := db.Query(context.Background(), query, clienteId)
-		defer rows.Close()
+
 		if err != nil {
 			panic(err)
 		}
-		
+
+		defer rows.Close()
+
 		var clientes []Cliente
 		var transacoes []Transacao
 
 		for rows.Next() {
 			var cliente Cliente
 			var transacao Transacao
-	
+
 			err := rows.Scan(
 				&cliente.ID, &cliente.Nome, &cliente.Limite, &cliente.Saldo,
 				&transacao.ID, &transacao.ClienteID, &transacao.Valor, &transacao.Tipo, &transacao.Descricao, &transacao.RealizadaEm,
@@ -123,43 +163,48 @@ func main() {
 			transacoes = append(transacoes, transacao)
 		}
 
-		saldo := map[string]interface{}{
-			"total":       clientes[0].Saldo,
-			"data_extrato": time.Now().UTC(),
-			"limite":      clientes[0].Limite,
-		}
-		
-		var ultimasTransacoes []TransacaoResponse 
+		var ultimasTransacoes []TransacaoResponse
 
-		for _,  transacao := range transacoes {
+		for _, transacao := range transacoes {
 			if transacao.Valor.Valid {
 				ultimaTransacao := TransacaoResponse{
-					Valor: transacao.Valor.Int64,
-					Tipo: transacao.Tipo.String,
-					Descricao: transacao.Descricao.String,
+					Valor:       transacao.Valor.Int64,
+					Tipo:        transacao.Tipo.String,
+					Descricao:   transacao.Descricao.String,
 					RealizadaEm: transacao.RealizadaEm.Time,
 				}
 				ultimasTransacoes = append(ultimasTransacoes, ultimaTransacao)
 			}
-			
+
+		}
+		saldoResponse := SaldoResponse{
+			Total:       clientes[0].Saldo,
+			DataExtrato: time.Now().UTC(),
+			Limite:      clientes[0].Limite,
 		}
 
-
-		resposta := gin.H{
-			"saldo": saldo,
-			"ultimas_transacoes": ultimasTransacoes,
+		resposta := ExtratoResponse{
+			Saldo:             saldoResponse,
+			UltimasTransacoes: ultimasTransacoes,
 		}
+
 		c.JSON(http.StatusOK, resposta)
 	})
 
 	r.POST("/clientes/:id/transacoes", func(c *gin.Context) {
 		clienteId := c.Param("id")
 		clienteIdAsNum, err := strconv.Atoi(clienteId)
+
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
 		if clienteIdAsNum < 0 || clienteIdAsNum > 5 {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		
+
 		var transacao TransacaoRequest
 		if err := c.ShouldBindJSON(&transacao); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err})
@@ -170,12 +215,12 @@ func main() {
 			c.Status(http.StatusUnprocessableEntity)
 			return
 		}
-		
+
 		if transacao.Tipo != "d" && transacao.Tipo != "c" {
 			c.Status(http.StatusUnprocessableEntity)
 			return
 		}
-		
+
 		if len(transacao.Descricao) < 1 || len(transacao.Descricao) > 10 {
 			c.Status(http.StatusUnprocessableEntity)
 			return
@@ -194,11 +239,12 @@ func main() {
 			RETURNING saldo, limite
 			`, clienteId, valorTransacao)
 
-		defer rows.Close()
 		if err != nil {
 			panic(err)
 		}
-		
+
+		defer rows.Close()
+
 		var saldo, limite int
 		for rows.Next() {
 			if err := rows.Scan(&saldo, &limite); err != nil {
@@ -223,10 +269,10 @@ func main() {
 
 		c.JSON(http.StatusOK, gin.H{
 			"limite": limite,
-			"saldo": saldo,
+			"saldo":  saldo,
 		})
 
 	})
-	
+
 	r.Run(":8080")
 }

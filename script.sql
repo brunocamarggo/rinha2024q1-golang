@@ -17,7 +17,7 @@ CREATE UNLOGGED TABLE transacoes (
 );
 
 CREATE INDEX idx_cliente_id ON transacoes(cliente_id);
-CREATE INDEX idx_realizada_em ON transacoes(realizada_em DESC);
+CREATE INDEX idx_realizada_em ON transacoes(realizada_em);
 
 DO $$
 BEGIN
