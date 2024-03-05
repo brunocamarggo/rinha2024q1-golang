@@ -273,6 +273,7 @@ func main() {
 		})
 
 	})
-
-	r.Run(":8080")
+	var port = ":" + getEnv("HTTP_PORT", "8080")
+	fmt.Println("DB_MIN_CONNS:	" + port)
+	r.Run(port)
 }
